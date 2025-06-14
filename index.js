@@ -1,72 +1,74 @@
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const pino = require('pino');
-const dotenv = require('dotenv');
-const { default: makeWASocket, useMultiFileAuthState, useSingleFileAuthState, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const express = require("express");
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys");
+const pino = require("pino");
+const fs = require("fs-extra");
+const cors = require("cors");
 
-dotenv.config();
 const app = express();
+app.use(cors());
 app.use(express.json());
 
-const SESSIONS_DIR = path.join(__dirname, 'sessions');
-if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR);
+const SESSIONS_DIR = "./sessions";
 
-// ✅ API route to generate session using 8-digit pairing code
-app.post('/generate', async (req, res) => {
-    const { pairing_code, session_id } = req.body;
+// Ensure sessions folder exists
+if (!fs.existsSync(SESSIONS_DIR)) {
+  fs.mkdirSync(SESSIONS_DIR);
+}
 
-    if (!pairing_code || !session_id)
-        return res.status(400).json({ success: false, message: 'pairing_code aur session_id dono zaroori hain.' });
+// 🔁 POST: /generate
+app.post("/generate", async (req, res) => {
+  const { pairing_code, session_id } = req.body;
 
-    const sessionPath = path.join(SESSIONS_DIR, session_id);
-    if (!fs.existsSync(sessionPath)) fs.mkdirSync(sessionPath);
+  if (!pairing_code || !session_id) {
+    return res.status(400).json({ success: false, message: "pairing_code and session_id are required." });
+  }
 
+  const sessionPath = `${SESSIONS_DIR}/${session_id}`;
+  if (!fs.existsSync(sessionPath)) {
+    fs.mkdirSync(sessionPath, { recursive: true });
+  }
+
+  try {
     const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
     const { version } = await fetchLatestBaileysVersion();
 
     const sock = makeWASocket({
-        version,
-        logger: pino({ level: 'silent' }),
-        auth: state,
-        printQRInTerminal: false,
-        browser: ['Arslan-MD', 'Chrome', '1.0.0']
+      version,
+      logger: pino({ level: "silent" }),
+      printQRInTerminal: false,
+      auth: {
+        creds: state.creds,
+        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
+      },
     });
 
-    // ✅ Handle pairing
-    try {
-        await sock.requestPairingCode(pairing_code);
-        sock.ev.on('connection.update', async (update) => {
-            const { connection, lastDisconnect } = update;
+    await sock.ws.send(JSON.stringify({
+      action: "pair-device",
+      pairingCode: pairing_code
+    }));
 
-            if (connection === 'open') {
-                console.log('✅ WhatsApp connected using pairing code');
-                return res.json({ success: true, session_id, message: 'Session created successfully!' });
-            }
+    sock.ev.on("connection.update", (update) => {
+      const { connection } = update;
+      if (connection === "open") {
+        console.log(`✅ Session Created for ${session_id}`);
+        return res.json({ success: true, session_id });
+      }
+    });
 
-            if (connection === 'close') {
-                console.log('❌ Connection closed');
-                return res.status(500).json({ success: false, message: 'Failed to connect.' });
-            }
-        });
-
-        sock.ev.on('creds.update', saveCreds);
-    } catch (err) {
-        console.log('❌ Pairing error:', err);
-        return res.status(500).json({ success: false, message: 'Pairing failed!', error: err.message });
-    }
+    sock.ev.on("creds.update", saveCreds);
+  } catch (err) {
+    console.error("❌ Pairing Error:", err);
+    return res.status(500).json({ success: false, message: "Pairing failed!", error: err.message });
+  }
 });
 
-// ✅ Check session exists
-app.get('/check/:session_id', (req, res) => {
-    const sessionPath = path.join(SESSIONS_DIR, req.params.session_id);
-    if (fs.existsSync(sessionPath)) {
-        return res.json({ success: true, message: 'Session exists.' });
-    }
-    return res.status(404).json({ success: false, message: 'Session not found.' });
+// Root
+app.get("/", (req, res) => {
+  res.send("🟢 Arslan-MD API is Live!");
 });
 
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 Arslan-MD Pairing API running at http://localhost:${PORT}`);
+  console.log(`🚀 Arslan-MD Pairing API running on http://localhost:${PORT}`);
 });
