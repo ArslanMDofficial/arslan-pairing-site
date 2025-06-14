@@ -1,74 +1,52 @@
 const express = require("express");
-const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion, makeCacheableSignalKeyStore } = require("@whiskeysockets/baileys");
-const pino = require("pino");
-const fs = require("fs-extra");
+const { default: makeWASocket, useMultiFileAuthState, fetchLatestBaileysVersion } = require("@whiskeysockets/baileys");
 const cors = require("cors");
+const fs = require("fs-extra");
+const path = require("path");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const SESSIONS_DIR = "./sessions";
+app.post("/pair", async (req, res) => {
+    const { pairing_code, session_id } = req.body;
 
-// Ensure sessions folder exists
-if (!fs.existsSync(SESSIONS_DIR)) {
-  fs.mkdirSync(SESSIONS_DIR);
-}
+    if (!pairing_code || !session_id) {
+        return res.status(400).json({ success: false, message: "Pairing code aur session_id lazmi hai." });
+    }
 
-// 🔁 POST: /generate
-app.post("/generate", async (req, res) => {
-  const { pairing_code, session_id } = req.body;
+    try {
+        const sessionPath = path.join(__dirname, "sessions", session_id);
+        const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
+        const { version } = await fetchLatestBaileysVersion();
 
-  if (!pairing_code || !session_id) {
-    return res.status(400).json({ success: false, message: "pairing_code and session_id are required." });
-  }
+        const sock = makeWASocket({
+            auth: state,
+            version,
+            printQRInTerminal: false,
+            browser: ['ArslanMD', 'Chrome', '1.0.0']
+        });
 
-  const sessionPath = `${SESSIONS_DIR}/${session_id}`;
-  if (!fs.existsSync(sessionPath)) {
-    fs.mkdirSync(sessionPath, { recursive: true });
-  }
+        sock.ev.on("connection.update", async (update) => {
+            const { connection, pairingCode } = update;
+            if (pairingCode) {
+                console.log("📲 Pair this code in WhatsApp:", pairingCode);
+            }
 
-  try {
-    const { state, saveCreds } = await useMultiFileAuthState(sessionPath);
-    const { version } = await fetchLatestBaileysVersion();
+            if (connection === "open") {
+                console.log("✅ Paired successfully");
+                return res.json({ success: true, session_id, message: "WhatsApp paired successfully!" });
+            }
+        });
 
-    const sock = makeWASocket({
-      version,
-      logger: pino({ level: "silent" }),
-      printQRInTerminal: false,
-      auth: {
-        creds: state.creds,
-        keys: makeCacheableSignalKeyStore(state.keys, pino({ level: "fatal" })),
-      },
-    });
+        sock.ev.on("creds.update", saveCreds);
 
-    await sock.ws.send(JSON.stringify({
-      action: "pair-device",
-      pairingCode: pairing_code
-    }));
-
-    sock.ev.on("connection.update", (update) => {
-      const { connection } = update;
-      if (connection === "open") {
-        console.log(`✅ Session Created for ${session_id}`);
-        return res.json({ success: true, session_id });
-      }
-    });
-
-    sock.ev.on("creds.update", saveCreds);
-  } catch (err) {
-    console.error("❌ Pairing Error:", err);
-    return res.status(500).json({ success: false, message: "Pairing failed!", error: err.message });
-  }
+    } catch (err) {
+        console.error("❌ Error pairing:", err);
+        return res.status(500).json({ success: false, message: "Pairing failed", error: err.message });
+    }
 });
 
-// Root
-app.get("/", (req, res) => {
-  res.send("🟢 Arslan-MD API is Live!");
-});
-
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Arslan-MD Pairing API running on http://localhost:${PORT}`);
+app.listen(3000, () => {
+    console.log("🚀 Arslan-MD Pairing API running on http://localhost:3000");
 });
